@@ -52,6 +52,7 @@ mod editor_tests;
 mod signature_help;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
+mod type_to_accept;
 
 pub(crate) use actions::*;
 pub use display_map::{
@@ -1358,6 +1359,7 @@ pub struct Editor {
     sticky_headers_task: Task<()>,
     sticky_headers: Option<Vec<OutlineItem<Anchor>>>,
     pub(crate) colorize_brackets_task: Task<()>,
+    type_to_accept_session: Option<type_to_accept::TypeToAcceptSession>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -2615,6 +2617,7 @@ impl Editor {
             sticky_headers_task: Task::ready(()),
             sticky_headers: None,
             colorize_brackets_task: Task::ready(()),
+            type_to_accept_session: None,
         };
 
         if is_minimap {
