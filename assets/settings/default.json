@@ -1117,6 +1117,30 @@
     //
     // Default: false
     "show_turn_stats": false,
+    // Settings for the type-to-accept feature, which requires users to type
+    // AI-suggested code character by character instead of accepting it automatically.
+    "type_to_accept": {
+      // Whether type-to-accept mode is enabled.
+      //
+      // Default: false
+      "enabled": false,
+      // Opacity of the pending-text overlay (0.0 = invisible, 1.0 = opaque).
+      //
+      // Default: 0.4
+      "ghost_opacity": 0.4,
+      // Duration in milliseconds of the error flash on a wrong keystroke.
+      //
+      // Default: 200
+      "error_flash_duration_ms": 200,
+      // Whether to show a progress indicator in the status bar.
+      //
+      // Default: true
+      "show_progress": true,
+      // File extensions where type-to-accept is bypassed.
+      //
+      // Default: ["json", "toml", "yaml", "yml", "lock", "svg", "png", "jpg", "md"]
+      "skip_file_types": ["json", "toml", "yaml", "yml", "lock", "svg", "png", "jpg", "md"]
+    },
   },
   // Whether the screen sharing icon is shown in the os status bar.
   "show_call_status_icon": true,

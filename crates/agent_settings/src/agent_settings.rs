@@ -21,6 +21,37 @@ pub const SUMMARIZE_THREAD_PROMPT: &str = include_str!("prompts/summarize_thread
 pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
     include_str!("prompts/summarize_thread_detailed_prompt.txt");
 
+#[derive(Clone, Debug)]
+pub struct TypeToAcceptSettings {
+    pub enabled: bool,
+    pub ghost_opacity: f32,
+    pub error_flash_duration_ms: u64,
+    pub show_progress: bool,
+    pub skip_file_types: Vec<String>,
+}
+
+impl Default for TypeToAcceptSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ghost_opacity: 0.4,
+            error_flash_duration_ms: 200,
+            show_progress: true,
+            skip_file_types: vec![
+                "json".into(),
+                "toml".into(),
+                "yaml".into(),
+                "yml".into(),
+                "lock".into(),
+                "svg".into(),
+                "png".into(),
+                "jpg".into(),
+                "md".into(),
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct AgentSettings {
     pub enabled: bool,
@@ -51,6 +82,7 @@ pub struct AgentSettings {
     pub message_editor_min_lines: usize,
     pub show_turn_stats: bool,
     pub tool_permissions: ToolPermissions,
+    pub type_to_accept: TypeToAcceptSettings,
 }
 
 impl AgentSettings {
@@ -438,6 +470,23 @@ impl Settings for AgentSettings {
             message_editor_min_lines: agent.message_editor_min_lines.unwrap(),
             show_turn_stats: agent.show_turn_stats.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
+            type_to_accept: {
+                let content = agent.type_to_accept.unwrap_or_default();
+                let defaults = TypeToAcceptSettings::default();
+                TypeToAcceptSettings {
+                    enabled: content.enabled.unwrap_or(defaults.enabled),
+                    ghost_opacity: content.ghost_opacity.unwrap_or(defaults.ghost_opacity),
+                    error_flash_duration_ms: content
+                        .error_flash_duration_ms
+                        .unwrap_or(defaults.error_flash_duration_ms),
+                    show_progress: content.show_progress.unwrap_or(defaults.show_progress),
+                    skip_file_types: if content.skip_file_types.is_empty() {
+                        defaults.skip_file_types
+                    } else {
+                        content.skip_file_types
+                    },
+                }
+            },
         }
     }
 }
