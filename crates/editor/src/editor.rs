@@ -4598,6 +4598,10 @@ impl Editor {
     }
 
     pub fn handle_input(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_type_to_accept_char(text, window, cx) {
+            return;
+        }
+
         let text: Arc<str> = text.into();
 
         if self.read_only(cx) {
@@ -5097,6 +5101,10 @@ impl Editor {
     }
 
     pub fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_type_to_accept_char("\n", window, cx) {
+            return;
+        }
+
         if self.read_only(cx) {
             return;
         }
@@ -10786,7 +10794,229 @@ impl Editor {
         });
     }
 
+    /// Starts a type-to-accept session for a block of text.
+    ///
+    /// The buffer must already contain `target_text` at the range
+    /// `[start_anchor, end_anchor)`. The user must type every character of
+    /// `target_text`; only then is `on_complete` called to finalize the edit.
+    pub fn start_type_to_accept(
+        &mut self,
+        target_text: String,
+        start_anchor: Anchor,
+        end_anchor: Anchor,
+        on_complete: Box<dyn FnOnce(&mut Window, &mut Context<Self>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if target_text.is_empty() {
+            on_complete(window, cx);
+            return;
+        }
+
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_anchor_ranges([start_anchor..start_anchor]);
+        });
+
+        self.type_to_accept_session = Some(type_to_accept::TypeToAcceptSession::new(
+            target_text,
+            start_anchor,
+            end_anchor,
+            on_complete,
+        ));
+
+        self.update_type_to_accept_highlight(cx);
+        cx.notify();
+    }
+
+    /// Called from the `SkipTypeToAccept` action. Accepts all remaining text
+    /// immediately without requiring the user to type it.
+    pub fn skip_type_to_accept(
+        &mut self,
+        _: &SkipTypeToAccept,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.type_to_accept_session.is_none() {
+            return;
+        }
+
+        // Move cursor to end of hunk before finalizing.
+        let end_anchor = self
+            .type_to_accept_session
+            .as_ref()
+            .map(|s| s.end_anchor);
+        if let Some(end_anchor) = end_anchor {
+            self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                selections.select_anchor_ranges([end_anchor..end_anchor]);
+            });
+        }
+
+        self.complete_type_to_accept(window, cx);
+    }
+
+    /// Handles a single character of input while a type-to-accept session is active.
+    ///
+    /// Returns `true` if the input was consumed (session is active), `false`
+    /// if the caller should proceed with normal insertion.
+    fn handle_type_to_accept_char(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.type_to_accept_session.is_none() {
+            return false;
+        }
+
+        // Only handle single-character input; multi-char (paste, IME) passes through.
+        let mut chars = text.chars();
+        let Some(ch) = chars.next() else {
+            return false;
+        };
+        if chars.next().is_some() {
+            return false;
+        }
+
+        let expected: Option<char> = {
+            let session = self.type_to_accept_session.as_ref().unwrap();
+            session.next_expected_char()
+        };
+
+        if Some(ch) == expected {
+            // Correct character: advance the session.
+            let char_len = ch.len_utf8();
+            let (start_anchor, bytes_typed, is_complete) = {
+                let session = self.type_to_accept_session.as_mut().unwrap();
+                session.bytes_typed += char_len;
+                let is_complete = session.is_complete();
+                (session.start_anchor, session.bytes_typed, is_complete)
+            };
+
+            // Move the cursor forward by one character through the existing text.
+            let snapshot = self.buffer.read(cx).snapshot(cx);
+            let start_offset = start_anchor.to_offset(&snapshot);
+            let new_offset = MultiBufferOffset(start_offset.0 + bytes_typed);
+            let new_anchor = snapshot.anchor_after(new_offset);
+            drop(snapshot);
+
+            self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                selections.select_anchor_ranges([new_anchor..new_anchor]);
+            });
+
+            self.update_type_to_accept_highlight(cx);
+
+            if is_complete {
+                self.complete_type_to_accept(window, cx);
+            }
+        } else {
+            // Wrong character: record error, do not advance.
+            if let Some(session) = self.type_to_accept_session.as_mut() {
+                session.error_count += 1;
+            }
+            cx.notify();
+        }
+
+        true
+    }
+
+    /// Handles a backspace keystroke while a type-to-accept session is active.
+    ///
+    /// Returns `true` if the backspace was consumed by the session.
+    fn handle_type_to_accept_backspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.type_to_accept_session.is_none() {
+            return false;
+        }
+
+        let session = self.type_to_accept_session.as_ref().unwrap();
+        if session.bytes_typed == 0 {
+            // Already at the beginning; consume the key but do nothing.
+            return true;
+        }
+
+        let prev_char: Option<char> =
+            session.target_text[..session.bytes_typed].chars().last();
+        let Some(prev_ch) = prev_char else {
+            return true;
+        };
+
+        let (start_anchor, bytes_typed) = {
+            let session = self.type_to_accept_session.as_mut().unwrap();
+            session.bytes_typed -= prev_ch.len_utf8();
+            (session.start_anchor, session.bytes_typed)
+        };
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let start_offset = start_anchor.to_offset(&snapshot);
+        let new_offset = MultiBufferOffset(start_offset.0 + bytes_typed);
+        let new_anchor = snapshot.anchor_after(new_offset);
+        drop(snapshot);
+
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_anchor_ranges([new_anchor..new_anchor]);
+        });
+
+        self.update_type_to_accept_highlight(cx);
+        true
+    }
+
+    /// Refreshes the highlight that marks the not-yet-typed portion of the hunk.
+    fn update_type_to_accept_highlight(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.type_to_accept_session else {
+            self.clear_highlights(HighlightKey::TypeToAcceptPending, cx);
+            return;
+        };
+
+        let start_anchor = session.start_anchor;
+        let bytes_typed = session.bytes_typed;
+        let end_anchor = session.end_anchor;
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let start_offset = start_anchor.to_offset(&snapshot);
+        let current_offset = MultiBufferOffset(start_offset.0 + bytes_typed);
+
+        if current_offset >= end_anchor.to_offset(&snapshot) {
+            drop(snapshot);
+            self.clear_highlights(HighlightKey::TypeToAcceptPending, cx);
+            return;
+        }
+
+        let current_anchor = snapshot.anchor_after(current_offset);
+        drop(snapshot);
+
+        let pending_color = cx.theme().status().predictive;
+        let style = HighlightStyle {
+            color: Some(pending_color),
+            ..HighlightStyle::default()
+        };
+
+        self.highlight_text(
+            HighlightKey::TypeToAcceptPending,
+            vec![current_anchor..end_anchor],
+            style,
+            cx,
+        );
+    }
+
+    /// Finalizes a type-to-accept session: clears the highlight and invokes the
+    /// completion callback.
+    fn complete_type_to_accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(mut session) = self.type_to_accept_session.take() {
+            self.clear_highlights(HighlightKey::TypeToAcceptPending, cx);
+            if let Some(on_complete) = session.on_complete.take() {
+                on_complete(window, cx);
+            }
+        }
+    }
+
     pub fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_type_to_accept_backspace(window, cx) {
+            return;
+        }
+
         if self.read_only(cx) {
             return;
         }
