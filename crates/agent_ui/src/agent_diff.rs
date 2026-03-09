@@ -3,7 +3,7 @@ use acp_thread::{AcpThread, AcpThreadEvent};
 use action_log::{ActionLogTelemetry, LastRejectUndo};
 use agent_settings::AgentSettings;
 use anyhow::Result;
-use buffer_diff::DiffHunkStatus;
+use buffer_diff::{DiffHunkStatus, DiffHunkStatusKind};
 use collections::{HashMap, HashSet};
 use editor::{
     Direction, Editor, EditorEvent, EditorSettings, MultiBuffer, MultiBufferSnapshot,
@@ -301,11 +301,17 @@ impl AgentDiffPane {
         });
     }
 
-    fn keep_all(&mut self, _: &KeepAll, _window: &mut Window, cx: &mut Context<Self>) {
-        let telemetry = ActionLogTelemetry::from(self.thread.read(cx));
-        let action_log = self.thread.read(cx).action_log().clone();
-        action_log.update(cx, |action_log, cx| {
-            action_log.keep_all_edits(Some(telemetry), cx)
+    fn keep_all(&mut self, _: &KeepAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            keep_edits_in_ranges(
+                editor,
+                &snapshot,
+                &self.thread,
+                vec![editor::Anchor::min()..editor::Anchor::max()],
+                window,
+                cx,
+            );
         });
     }
 }
@@ -374,7 +380,7 @@ fn keep_edits_in_ranges(
 
         // Check whether this hunk should use type-to-accept.
         let use_type_to_accept = type_to_accept_enabled
-            && !matches!(hunk.status, DiffHunkStatus::Deleted)
+            && !matches!(hunk.status.kind, DiffHunkStatusKind::Deleted)
             && {
                 let settings = &AgentSettings::get_global(cx).type_to_accept;
                 let extension = buffer
