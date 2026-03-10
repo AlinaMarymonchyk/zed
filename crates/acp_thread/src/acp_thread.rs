@@ -15,8 +15,10 @@ use language::language_settings::FormatOnSave;
 use language::{Anchor, Buffer, BufferSnapshot, LanguageRegistry, Point, ToPoint, text_diff};
 use markdown::Markdown;
 pub use mention::*;
+use agent_settings::AgentSettings;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
-use project::{AgentLocation, Project, git_store::GitStoreCheckpoint};
+use project::{AgentLocation, Project, TypeToAcceptRequest, git_store::GitStoreCheckpoint};
+use settings::Settings;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string_pretty;
 use std::collections::HashMap;
@@ -2295,6 +2297,7 @@ impl AcpThread {
         content: String,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        log::warn!("acp_thread::write_text_file called for path: {:?}", path);
         let project = self.project.clone();
         let action_log = self.action_log.clone();
         let should_update_agent_location = self.parent_session_id.is_none();
@@ -2340,6 +2343,10 @@ impl AcpThread {
                 });
             }
 
+            // Capture old text before applying edits for type-to-accept comparison
+            log::warn!("acp_thread: write_text_file about to capture old_text");
+            let old_text = buffer.read_with(cx, |buffer, _| buffer.text());
+
             let format_on_save = cx.update(|cx| {
                 action_log.update(cx, |action_log, cx| {
                     action_log.buffer_read(buffer.clone(), cx);
@@ -2359,6 +2366,66 @@ impl AcpThread {
                 action_log.update(cx, |action_log, cx| {
                     action_log.buffer_edited(buffer.clone(), cx);
                 });
+
+                // Trigger type-to-accept if enabled
+                let tta_settings = AgentSettings::get_global(cx).type_to_accept.clone();
+                if tta_settings.enabled {
+                    let should_skip = buffer
+                        .read(cx)
+                        .file()
+                        .and_then(|file| {
+                            file.path()
+                                .extension()
+                                .map(|e| e.to_lowercase())
+                        })
+                        .map(|ext| {
+                            tta_settings
+                                .skip_file_types
+                                .iter()
+                                .any(|skip| skip == &ext)
+                        })
+                        .unwrap_or(false);
+
+                    if !should_skip {
+                        let new_text = buffer.read(cx).text();
+                        if old_text != new_text {
+                            let buffer_snapshot = buffer.read(cx).snapshot();
+                            let diff_start = old_text
+                                .bytes()
+                                .zip(new_text.bytes())
+                                .position(|(a, b)| a != b)
+                                .unwrap_or(0);
+                            let new_end = new_text.len();
+                            let changed_text =
+                                new_text[diff_start..new_end].to_string();
+
+                            if !changed_text.is_empty() {
+                                let start_anchor =
+                                    buffer_snapshot.anchor_after(diff_start);
+                                let end_anchor =
+                                    buffer_snapshot.anchor_before(new_end);
+
+                                log::warn!(
+                                    "acp_thread: requesting type-to-accept, changed_len={}",
+                                    changed_text.len()
+                                );
+
+                                project.update(cx, |project, cx| {
+                                    project.request_type_to_accept(
+                                        TypeToAcceptRequest {
+                                            buffer: buffer.clone(),
+                                            new_text: changed_text,
+                                            start: start_anchor,
+                                            end: end_anchor,
+                                        },
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
+                    }
+                }
+
                 format_on_save
             });
 

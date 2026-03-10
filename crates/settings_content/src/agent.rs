@@ -122,6 +122,37 @@ pub struct AgentSettingsContent {
     /// `always_confirm`) match against the tool's text input (command, path,
     /// URL, etc.).
     pub tool_permissions: Option<ToolPermissionsContent>,
+    /// Settings for the type-to-accept mode, which requires users to type
+    /// AI-suggested code character by character instead of accepting it
+    /// automatically. Off by default.
+    pub type_to_accept: Option<TypeToAcceptSettingsContent>,
+}
+
+/// Settings for the type-to-accept feature.
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
+pub struct TypeToAcceptSettingsContent {
+    /// Whether type-to-accept mode is enabled.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// Opacity of the pending-text overlay (0.0 = invisible, 1.0 = full color).
+    ///
+    /// Default: 0.4
+    pub ghost_opacity: Option<f32>,
+    /// Duration in milliseconds for the error flash when a wrong character is typed.
+    ///
+    /// Default: 200
+    pub error_flash_duration_ms: Option<u64>,
+    /// Whether to show a progress indicator in the status bar during a session.
+    ///
+    /// Default: true
+    pub show_progress: Option<bool>,
+    /// File extensions where type-to-accept is bypassed and edits are accepted
+    /// normally (e.g. "json", "toml", "yaml").
+    ///
+    /// Default: ["json", "toml", "yaml", "yml", "lock", "svg", "png", "jpg", "md"]
+    #[serde(default)]
+    pub skip_file_types: Vec<String>,
 }
 
 impl AgentSettingsContent {

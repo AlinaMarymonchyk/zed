@@ -785,6 +785,9 @@ actions!(
         ShowWordCompletions,
         /// Randomly shuffles selected lines.
         ShuffleLines,
+        /// Skips the remaining text in a type-to-accept session
+        /// and accepts the AI-suggested edit immediately.
+        SkipTypeToAccept,
         /// Navigates to the next signature in the signature help popup.
         SignatureHelpNext,
         /// Navigates to the previous signature in the signature help popup.

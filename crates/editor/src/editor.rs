@@ -41,6 +41,7 @@ mod selections_collection;
 pub mod semantic_tokens;
 mod split;
 pub mod split_editor_view;
+pub mod type_to_accept;
 pub mod tasks;
 
 #[cfg(test)]
@@ -1358,6 +1359,7 @@ pub struct Editor {
     sticky_headers_task: Task<()>,
     sticky_headers: Option<Vec<OutlineItem<Anchor>>>,
     pub(crate) colorize_brackets_task: Task<()>,
+    pub(crate) type_to_accept_session: Option<type_to_accept::TypeToAcceptSession>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -2273,6 +2275,10 @@ impl Editor {
                         }
                     }
 
+                    project::Event::TypeToAcceptRequested => {
+                        editor.handle_type_to_accept_requested(window, cx);
+                    }
+
                     _ => {}
                 },
             ));
@@ -2615,6 +2621,7 @@ impl Editor {
             sticky_headers_task: Task::ready(()),
             sticky_headers: None,
             colorize_brackets_task: Task::ready(()),
+            type_to_accept_session: None,
         };
 
         if is_minimap {
@@ -4595,6 +4602,10 @@ impl Editor {
     }
 
     pub fn handle_input(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_type_to_accept_char(text, window, cx) {
+            return;
+        }
+
         let text: Arc<str> = text.into();
 
         if self.read_only(cx) {
@@ -5094,6 +5105,10 @@ impl Editor {
     }
 
     pub fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_type_to_accept_char("\n", window, cx) {
+            return;
+        }
+
         if self.read_only(cx) {
             return;
         }
@@ -10783,7 +10798,274 @@ impl Editor {
         });
     }
 
+    pub fn start_type_to_accept(
+        &mut self,
+        target_text: String,
+        start_anchor: Anchor,
+        end_anchor: Anchor,
+        on_complete: Box<dyn FnOnce(&mut Window, &mut Context<Self>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if target_text.is_empty() {
+            on_complete(window, cx);
+            return;
+        }
+
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_anchor_ranges([start_anchor..start_anchor]);
+        });
+
+        self.type_to_accept_session = Some(type_to_accept::TypeToAcceptSession::new(
+            target_text,
+            start_anchor,
+            end_anchor,
+            on_complete,
+        ));
+
+        self.update_type_to_accept_highlight(cx);
+        cx.notify();
+    }
+
+    pub fn skip_type_to_accept(
+        &mut self,
+        _: &SkipTypeToAccept,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.type_to_accept_session.is_none() {
+            return;
+        }
+
+        let end_anchor = self
+            .type_to_accept_session
+            .as_ref()
+            .map(|s| s.end_anchor);
+        if let Some(end_anchor) = end_anchor {
+            self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                selections.select_anchor_ranges([end_anchor..end_anchor]);
+            });
+        }
+
+        self.complete_type_to_accept(window, cx);
+    }
+
+    fn handle_type_to_accept_char(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.type_to_accept_session.is_none() {
+            return false;
+        }
+
+        let mut chars = text.chars();
+        let Some(ch) = chars.next() else {
+            return false;
+        };
+        if chars.next().is_some() {
+            return false;
+        }
+
+        let expected = {
+            let session = self.type_to_accept_session.as_ref().expect("checked above");
+            session.next_expected_char()
+        };
+
+        if Some(ch) == expected {
+            let char_len = ch.len_utf8();
+            let (start_anchor, bytes_typed, is_complete) = {
+                let session = self.type_to_accept_session.as_mut().expect("checked above");
+                session.bytes_typed += char_len;
+                (session.start_anchor, session.bytes_typed, session.is_complete())
+            };
+
+            let snapshot = self.buffer.read(cx).snapshot(cx);
+            let start_offset = start_anchor.to_offset(&snapshot);
+            let new_offset = MultiBufferOffset(start_offset.0 + bytes_typed);
+            let new_anchor = snapshot.anchor_after(new_offset);
+            drop(snapshot);
+
+            self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                selections.select_anchor_ranges([new_anchor..new_anchor]);
+            });
+
+            self.update_type_to_accept_highlight(cx);
+
+            if is_complete {
+                self.complete_type_to_accept(window, cx);
+            }
+        } else {
+            if let Some(session) = self.type_to_accept_session.as_mut() {
+                session.error_count += 1;
+            }
+            cx.notify();
+        }
+
+        true
+    }
+
+    fn handle_type_to_accept_backspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.type_to_accept_session.is_none() {
+            return false;
+        }
+
+        let session = self.type_to_accept_session.as_ref().expect("checked above");
+        if session.bytes_typed == 0 {
+            return true;
+        }
+
+        let prev_char = session.target_text[..session.bytes_typed].chars().last();
+        let Some(prev_ch) = prev_char else {
+            return true;
+        };
+
+        let (start_anchor, bytes_typed) = {
+            let session = self.type_to_accept_session.as_mut().expect("checked above");
+            session.bytes_typed -= prev_ch.len_utf8();
+            (session.start_anchor, session.bytes_typed)
+        };
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let start_offset = start_anchor.to_offset(&snapshot);
+        let new_offset = MultiBufferOffset(start_offset.0 + bytes_typed);
+        let new_anchor = snapshot.anchor_after(new_offset);
+        drop(snapshot);
+
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_anchor_ranges([new_anchor..new_anchor]);
+        });
+
+        self.update_type_to_accept_highlight(cx);
+        true
+    }
+
+    fn update_type_to_accept_highlight(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.type_to_accept_session else {
+            self.clear_highlights(HighlightKey::TypeToAcceptPending, cx);
+            return;
+        };
+
+        let start_anchor = session.start_anchor;
+        let bytes_typed = session.bytes_typed;
+        let end_anchor = session.end_anchor;
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let start_offset = start_anchor.to_offset(&snapshot);
+        let current_offset = MultiBufferOffset(start_offset.0 + bytes_typed);
+
+        if current_offset >= end_anchor.to_offset(&snapshot) {
+            drop(snapshot);
+            self.clear_highlights(HighlightKey::TypeToAcceptPending, cx);
+            return;
+        }
+
+        let current_anchor = snapshot.anchor_after(current_offset);
+        drop(snapshot);
+
+        let pending_color = cx.theme().status().predictive;
+        let style = HighlightStyle {
+            color: Some(pending_color),
+            ..HighlightStyle::default()
+        };
+
+        self.highlight_text(
+            HighlightKey::TypeToAcceptPending,
+            vec![current_anchor..end_anchor],
+            style,
+            cx,
+        );
+    }
+
+    fn complete_type_to_accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(mut session) = self.type_to_accept_session.take() {
+            self.clear_highlights(HighlightKey::TypeToAcceptPending, cx);
+            if let Some(on_complete) = session.on_complete.take() {
+                on_complete(window, cx);
+            }
+        }
+    }
+
+    fn handle_type_to_accept_requested(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::warn!("editor: handle_type_to_accept_requested called");
+
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+
+        // Peek at the request to check if this editor has the buffer,
+        // without consuming it. Other editors subscribed to the same
+        // project also receive this event, and only the one that
+        // contains the buffer should consume the request.
+        let buffer_id = {
+            let pending = project.read(cx).peek_pending_type_to_accept();
+            let Some(pending) = pending else {
+                return;
+            };
+            pending.buffer.read(cx).remote_id()
+        };
+
+        let excerpt_id = {
+            let multi_buffer = self.buffer.read(cx);
+            let excerpts = multi_buffer.excerpts_for_buffer(buffer_id, cx);
+            if excerpts.is_empty() {
+                return;
+            }
+            excerpts[0].0
+        };
+
+        // This editor has the buffer — now consume the request.
+        let request = project.update(cx, |project, _cx| {
+            project.take_pending_type_to_accept()
+        });
+
+        let Some(request) = request else {
+            return;
+        };
+
+        log::warn!(
+            "editor: starting type-to-accept session, new_text_len={}",
+            request.new_text.len()
+        );
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+
+        let start_anchor = snapshot.anchor_in_excerpt(excerpt_id, request.start);
+        let end_anchor = snapshot.anchor_in_excerpt(excerpt_id, request.end);
+
+        let (Some(start_anchor), Some(end_anchor)) = (start_anchor, end_anchor) else {
+            return;
+        };
+
+        drop(snapshot);
+
+        let new_text = request.new_text;
+        self.start_type_to_accept(
+            new_text,
+            start_anchor,
+            end_anchor,
+            Box::new(|_window, _cx| {
+                log::info!("Type-to-accept session completed");
+            }),
+            window,
+            cx,
+        );
+    }
+
     pub fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_type_to_accept_backspace(window, cx) {
+            return;
+        }
+
         if self.read_only(cx) {
             return;
         }
