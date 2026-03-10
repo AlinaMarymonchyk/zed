@@ -3,7 +3,7 @@ use acp_thread::{AcpThread, AcpThreadEvent};
 use action_log::{ActionLogTelemetry, LastRejectUndo};
 use agent_settings::AgentSettings;
 use anyhow::Result;
-use buffer_diff::DiffHunkStatus;
+use buffer_diff::{DiffHunkStatus, DiffHunkStatusKind};
 use collections::{HashMap, HashSet};
 use editor::{
     Direction, Editor, EditorEvent, EditorSettings, MultiBuffer, MultiBufferSnapshot,
@@ -301,11 +301,17 @@ impl AgentDiffPane {
         });
     }
 
-    fn keep_all(&mut self, _: &KeepAll, _window: &mut Window, cx: &mut Context<Self>) {
-        let telemetry = ActionLogTelemetry::from(self.thread.read(cx));
-        let action_log = self.thread.read(cx).action_log().clone();
-        action_log.update(cx, |action_log, cx| {
-            action_log.keep_all_edits(Some(telemetry), cx)
+    fn keep_all(&mut self, _: &KeepAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            keep_edits_in_ranges(
+                editor,
+                &snapshot,
+                &self.thread,
+                vec![editor::Anchor::min()..editor::Anchor::max()],
+                window,
+                cx,
+            );
         });
     }
 }
@@ -363,11 +369,75 @@ fn keep_edits_in_ranges(
     update_editor_selection(editor, buffer_snapshot, &diff_hunks_in_ranges, window, cx);
 
     let multibuffer = editor.buffer().clone();
+    let type_to_accept_enabled = AgentSettings::get_global(cx).type_to_accept.enabled;
+
     for hunk in &diff_hunks_in_ranges {
-        let buffer = multibuffer.read(cx).buffer(hunk.buffer_id);
-        if let Some(buffer) = buffer {
-            let action_log = thread.read(cx).action_log().clone();
-            let telemetry = ActionLogTelemetry::from(thread.read(cx));
+        let Some(buffer) = multibuffer.read(cx).buffer(hunk.buffer_id) else {
+            continue;
+        };
+        let action_log = thread.read(cx).action_log().clone();
+        let telemetry = ActionLogTelemetry::from(thread.read(cx));
+
+        // Check whether this hunk should use type-to-accept.
+        let use_type_to_accept = type_to_accept_enabled
+            && !matches!(hunk.status.kind, DiffHunkStatusKind::Deleted)
+            && {
+                let settings = &AgentSettings::get_global(cx).type_to_accept;
+                let extension = buffer
+                    .read(cx)
+                    .file()
+                    .and_then(|file| file.path().extension())
+                    .map(|ext| ext.to_lowercase())
+                    .unwrap_or_default();
+                !settings
+                    .skip_file_types
+                    .iter()
+                    .any(|skipped| skipped == &extension)
+            };
+
+        if use_type_to_accept {
+            let new_text: String = buffer
+                .read(cx)
+                .text_for_range(hunk.buffer_range.clone())
+                .collect();
+
+            if new_text.is_empty() {
+                action_log.update(cx, |action_log, cx| {
+                    action_log.keep_edits_in_range(
+                        buffer,
+                        hunk.buffer_range.clone(),
+                        Some(telemetry),
+                        cx,
+                    )
+                });
+                continue;
+            }
+
+            let hunk_range = hunk.multi_buffer_range();
+            let start_anchor = hunk_range.start;
+            let end_anchor = hunk_range.end;
+            let buffer_range = hunk.buffer_range.clone();
+
+            let on_complete = Box::new(move |_window: &mut Window, cx: &mut Context<Editor>| {
+                action_log.update(cx, |action_log, cx| {
+                    action_log.keep_edits_in_range(
+                        buffer,
+                        buffer_range,
+                        Some(telemetry),
+                        cx,
+                    )
+                });
+            });
+
+            editor.start_type_to_accept(
+                new_text,
+                start_anchor,
+                end_anchor,
+                on_complete,
+                window,
+                cx,
+            );
+        } else {
             action_log.update(cx, |action_log, cx| {
                 action_log.keep_edits_in_range(
                     buffer,

@@ -53,6 +53,7 @@ mod editor_tests;
 mod signature_help;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
+mod type_to_accept;
 
 pub(crate) use actions::*;
 pub use display_map::{

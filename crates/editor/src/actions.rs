@@ -888,6 +888,8 @@ actions!(
         UnwrapSyntaxNode,
         /// Wraps selections in tag specified by language.
         WrapSelectionsInTag,
+        /// Skips remaining type-to-accept text and accepts the edit immediately.
+        SkipTypeToAccept,
     ]
 );
 
