@@ -212,7 +212,7 @@ mod tests {
                 cx,
             );
 
-            assert!(editor.type_to_accept_session.is_some());
+            assert!(!editor.type_to_accept_sessions.is_empty());
         });
 
         _ = editor.update(cx, |editor, window, cx| {
@@ -220,10 +220,10 @@ mod tests {
             assert!(editor.handle_type_to_accept_char("e", window, cx));
             assert!(editor.handle_type_to_accept_char("l", window, cx));
             assert!(editor.handle_type_to_accept_char("l", window, cx));
-            assert!(editor.type_to_accept_session.is_some());
+            assert!(!editor.type_to_accept_sessions.is_empty());
 
             assert!(editor.handle_type_to_accept_char("o", window, cx));
-            assert!(editor.type_to_accept_session.is_none());
+            assert!(editor.type_to_accept_sessions.is_empty());
         });
 
         assert!(*completed.borrow());
@@ -256,13 +256,13 @@ mod tests {
 
             // Wrong character should be consumed but not advance
             assert!(editor.handle_type_to_accept_char("x", window, cx));
-            let session = editor.type_to_accept_session.as_ref().unwrap();
+            let session = editor.type_to_accept_sessions.first().unwrap();
             assert_eq!(session.error_count, 1);
             assert_eq!(session.bytes_typed, 0);
 
             // Correct character should advance
             assert!(editor.handle_type_to_accept_char("a", window, cx));
-            let session = editor.type_to_accept_session.as_ref().unwrap();
+            let session = editor.type_to_accept_sessions.first().unwrap();
             assert_eq!(session.bytes_typed, 1);
         });
     }
@@ -294,15 +294,15 @@ mod tests {
 
             // Type 'a'
             editor.handle_type_to_accept_char("a", window, cx);
-            assert_eq!(editor.type_to_accept_session.as_ref().unwrap().bytes_typed, 1);
+            assert_eq!(editor.type_to_accept_sessions.first().unwrap().bytes_typed, 1);
 
             // Backspace should go back
             assert!(editor.handle_type_to_accept_backspace(window, cx));
-            assert_eq!(editor.type_to_accept_session.as_ref().unwrap().bytes_typed, 0);
+            assert_eq!(editor.type_to_accept_sessions.first().unwrap().bytes_typed, 0);
 
             // Backspace at beginning should be consumed but do nothing
             assert!(editor.handle_type_to_accept_backspace(window, cx));
-            assert_eq!(editor.type_to_accept_session.as_ref().unwrap().bytes_typed, 0);
+            assert_eq!(editor.type_to_accept_sessions.first().unwrap().bytes_typed, 0);
         });
     }
 
@@ -340,7 +340,7 @@ mod tests {
             editor.handle_type_to_accept_char("e", window, cx);
 
             editor.skip_type_to_accept(&crate::SkipTypeToAccept, window, cx);
-            assert!(editor.type_to_accept_session.is_none());
+            assert!(editor.type_to_accept_sessions.is_empty());
         });
 
         assert!(*completed.borrow());
@@ -376,7 +376,7 @@ mod tests {
                 cx,
             );
 
-            assert!(editor.type_to_accept_session.is_none());
+            assert!(editor.type_to_accept_sessions.is_empty());
         });
 
         assert!(*completed.borrow());
